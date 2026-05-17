@@ -5185,7 +5185,7 @@ loadRecipeImages().then(renderRecipes);
 
 <script>
 // ===== Google Sheets + Apps Script + Form Masukan Resep =====
-const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyNnBrfIJll4MiJJrJfAmxq3W3aT72b2sHarMdpyzY5xFBV8IemwmsX68cO2TNcDjSP/exec';
+const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzSzmvNUM4xZS4SwfdFpgNtcEtlf7aDE92gANbLEQQUtD-Vdd7bgcA8HDm2BpEa5vFO/exec';
 const LOCAL_SUBMISSION_KEY = 'dapurRasaRecipeSubmissions';
 const MAX_LOCAL_ITEMS = 20;
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -5429,6 +5429,323 @@ form?.addEventListener('submit', async (event) => {
 });
 
 refreshSubmissions();
+</script>
+
+
+<script>
+// ===== Sinkronisasi online foto + video per resep (lintas device) =====
+(function(){
+  const REMOTE_MEDIA_ENDPOINT = (typeof GOOGLE_SCRIPT_URL === 'string' && GOOGLE_SCRIPT_URL) || 'https://script.google.com/macros/s/AKfycbzSzmvNUM4xZS4SwfdFpgNtcEtlf7aDE92gANbLEQQUtD-Vdd7bgcA8HDm2BpEa5vFO/exec';
+  const REMOTE_SYNC_DELAY = 2500;
+  let syncTimer = null;
+  let syncInFlight = false;
+  let lastSyncAt = null;
+
+  function ensureSyncBadge() {
+    if (document.getElementById('mediaSyncBadge')) return document.getElementById('mediaSyncBadge');
+    const badge = document.createElement('div');
+    badge.id = 'mediaSyncBadge';
+    badge.setAttribute('aria-live', 'polite');
+    badge.style.position = 'fixed';
+    badge.style.left = '20px';
+    badge.style.bottom = '20px';
+    badge.style.zIndex = '1200';
+    badge.style.background = 'rgba(45, 24, 16, 0.92)';
+    badge.style.color = '#F7F1E8';
+    badge.style.padding = '10px 14px';
+    badge.style.borderRadius = '14px';
+    badge.style.fontSize = '12px';
+    badge.style.boxShadow = '0 8px 24px rgba(0,0,0,0.18)';
+    badge.style.maxWidth = '300px';
+    badge.innerHTML = '<strong style="display:block;margin-bottom:3px;">Sinkronisasi media</strong><span id="mediaSyncBadgeText">Menyiapkan sinkronisasi online...</span>';
+    document.body.appendChild(badge);
+    return badge;
+  }
+
+  function setSyncBadge(message) {
+    const badge = ensureSyncBadge();
+    const text = badge.querySelector('#mediaSyncBadgeText');
+    if (text) text.textContent = message;
+  }
+
+  function normalizeUrlOnline(value) {
+    const url = String(value || '').trim();
+    if (!url) return '';
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/i.test(parsed.protocol)) return '';
+      return parsed.href;
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function mergeRemoteMediaMap(map) {
+    recipeImages = {};
+    recipeVideos = {};
+    Object.entries(map || {}).forEach(([key, item]) => {
+      if (!item || typeof item !== 'object') return;
+      const imageUrl = String(item.imageUrl || item.photoPreviewUrl || '').trim();
+      const videoUrl = normalizeUrlOnline(item.videoUrl || item.linkVideo || item.videoTutorial || '');
+      if (imageUrl) recipeImages[key] = imageUrl;
+      if (videoUrl) recipeVideos[key] = videoUrl;
+    });
+    updateImageCounter();
+    renderRecipes();
+    if (activeRecipe) {
+      openRecipe(activeRecipe.category, activeRecipe.id, false);
+    }
+  }
+
+  function fetchRemoteMedia() {
+    return new Promise((resolve, reject) => {
+      const callbackName = '__dapurRasaMediaCallback_' + Date.now() + '_' + Math.floor(Math.random() * 1000000);
+      const script = document.createElement('script');
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Waktu ambil data media habis.'));
+      }, 12000);
+
+      function cleanup() {
+        clearTimeout(timeoutId);
+        script.remove();
+        try { delete window[callbackName]; } catch (_) { window[callbackName] = undefined; }
+      }
+
+      window[callbackName] = function(payload) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (!payload || payload.ok === false) {
+          reject(new Error(payload && payload.message ? payload.message : 'Data media tidak valid.'));
+          return;
+        }
+        resolve(payload);
+      };
+
+      script.onerror = function() {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Gagal memuat data media online.'));
+      };
+
+      script.src = REMOTE_MEDIA_ENDPOINT + '?action=media&callback=' + encodeURIComponent(callbackName) + '&t=' + Date.now();
+      document.body.appendChild(script);
+    });
+  }
+
+  async function refreshRemoteMedia(silent) {
+    if (syncInFlight) return;
+    syncInFlight = true;
+    if (!silent) setSyncBadge('Mengambil foto & video terbaru dari cloud...');
+    try {
+      const payload = await fetchRemoteMedia();
+      mergeRemoteMediaMap(payload.media || {});
+      lastSyncAt = new Date();
+      const totalMedia = Object.keys(payload.media || {}).length;
+      setSyncBadge('Sinkron aktif • ' + totalMedia + ' resep punya media • terakhir sinkron ' + lastSyncAt.toLocaleTimeString('id-ID'));
+    } catch (error) {
+      console.warn('Sinkron media gagal:', error);
+      setSyncBadge('Sinkron gagal. Biasanya karena Apps Script belum diupdate ke versi media online.');
+      if (!silent) showToast('Sinkron media online gagal. Update Google Apps Script lalu deploy ulang.');
+    } finally {
+      syncInFlight = false;
+    }
+  }
+
+  function scheduleRemoteRefresh() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => refreshRemoteMedia(true), REMOTE_SYNC_DELAY);
+  }
+
+  function dataUrlToParts(dataUrl) {
+    const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i.exec(String(dataUrl || ''));
+    if (!match) throw new Error('Format gambar tidak valid.');
+    return { mimeType: match[1], base64: match[2] };
+  }
+
+  async function postMediaUpdate(fields) {
+    const payload = new FormData();
+    payload.append('mode', 'recipeMedia');
+    Object.entries(fields || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null) return;
+      payload.append(key, value);
+    });
+    await fetch(REMOTE_MEDIA_ENDPOINT, {
+      method: 'POST',
+      mode: 'no-cors',
+      body: payload
+    });
+  }
+
+  function getRecipeMetaByKey(key) {
+    const recipe = findRecipeByKey(key) || activeRecipe;
+    if (!recipe) throw new Error('Resep tidak ditemukan.');
+    return {
+      recipeKey: key,
+      recipeId: recipe.id,
+      category: recipe.category,
+      recipeName: recipe.name,
+      updatedBy: navigator.userAgent.slice(0, 180)
+    };
+  }
+
+  // Override local-only video behavior with online sync.
+  loadRecipeVideos = function() {
+    recipeVideos = {};
+  };
+
+  saveRecipeVideos = function() {
+    // Disengaja kosong: sumber utama sekarang Google Apps Script, bukan localStorage.
+  };
+
+  getRecipeVideoUrl = function(recipe, key) {
+    return String(recipeVideos[key] || recipe.videoUrl || '').trim();
+  };
+
+  // Override local-only image loading with remote sync.
+  loadRecipeImages = async function() {
+    recipeImages = {};
+    updateImageCounter();
+    await refreshRemoteMedia(true);
+  };
+
+  saveRecipeImage = async function(key, dataUrl) {
+    const meta = getRecipeMetaByKey(key);
+    recipeImages[key] = dataUrl;
+    updateImageCounter();
+    renderRecipes();
+    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+      openRecipe(activeRecipe.category, activeRecipe.id, false);
+    }
+    showToast('Mengupload foto ke cloud... tunggu beberapa detik.');
+
+    try {
+      const parts = dataUrlToParts(dataUrl);
+      await postMediaUpdate({
+        ...meta,
+        fotoBase64: parts.base64,
+        fotoMime: parts.mimeType,
+        fotoName: meta.recipeId + '.jpg'
+      });
+      showToast('Foto resep dikirim ke cloud. Refresh di device lain untuk melihat hasilnya.');
+      setSyncBadge('Foto diupload. Menyinkronkan ulang...');
+      scheduleRemoteRefresh();
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'Gagal upload foto ke cloud.');
+      setSyncBadge('Upload foto gagal. Cek Apps Script atau folder Google Drive.');
+      throw error;
+    }
+  };
+
+  deleteRecipeImage = async function(key) {
+    const meta = getRecipeMetaByKey(key);
+    delete recipeImages[key];
+    updateImageCounter();
+    renderRecipes();
+    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+      openRecipe(activeRecipe.category, activeRecipe.id, false);
+    }
+
+    try {
+      await postMediaUpdate({ ...meta, removePhoto: '1' });
+      showToast('Foto dihapus dari cloud.');
+      setSyncBadge('Foto dihapus. Menyinkronkan ulang...');
+      scheduleRemoteRefresh();
+    } catch (error) {
+      console.error(error);
+      showToast('Gagal menghapus foto dari cloud.');
+      setSyncBadge('Gagal menghapus foto dari cloud.');
+      throw error;
+    }
+  };
+
+  removeRecipeImage = async function(key) {
+    try {
+      await deleteRecipeImage(key);
+    } catch (error) {
+      // toast sudah ditangani di deleteRecipeImage
+    }
+  };
+
+  startVideoEdit = async function(key) {
+    const recipe = findRecipeByKey(key) || activeRecipe;
+    const current = recipe ? getRecipeVideoUrl(recipe, key) : (recipeVideos[key] || '');
+    const input = prompt('Tempel link video tutorial untuk resep ini. Sebaiknya YouTube atau Google Drive. Kosongkan lalu OK untuk menghapus.', current || '');
+    if (input === null) return;
+
+    const trimmed = String(input).trim();
+    const meta = getRecipeMetaByKey(key);
+
+    if (!trimmed) {
+      delete recipeVideos[key];
+      renderRecipes();
+      if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+        openRecipe(activeRecipe.category, activeRecipe.id, false);
+      }
+      try {
+        await postMediaUpdate({ ...meta, removeVideo: '1' });
+        showToast('Video tutorial dihapus dari cloud.');
+        setSyncBadge('Video dihapus. Menyinkronkan ulang...');
+        scheduleRemoteRefresh();
+      } catch (error) {
+        console.error(error);
+        showToast('Gagal menghapus video di cloud.');
+      }
+      return;
+    }
+
+    const normalized = normalizeUrlOnline(trimmed);
+    if (!normalized) {
+      showToast('Link video tidak valid. Gunakan link http/https.');
+      return;
+    }
+
+    recipeVideos[key] = normalized;
+    renderRecipes();
+    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+      openRecipe(activeRecipe.category, activeRecipe.id, false);
+    }
+
+    try {
+      await postMediaUpdate({ ...meta, videoUrl: normalized });
+      showToast('Video tutorial dikirim ke cloud.');
+      setSyncBadge('Video disimpan. Menyinkronkan ulang...');
+      scheduleRemoteRefresh();
+    } catch (error) {
+      console.error(error);
+      showToast('Gagal menyimpan video di cloud.');
+      setSyncBadge('Gagal menyimpan video di cloud.');
+    }
+  };
+
+  removeRecipeVideo = async function(key) {
+    const meta = getRecipeMetaByKey(key);
+    delete recipeVideos[key];
+    renderRecipes();
+    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+      openRecipe(activeRecipe.category, activeRecipe.id, false);
+    }
+    try {
+      await postMediaUpdate({ ...meta, removeVideo: '1' });
+      showToast('Video tutorial dihapus dari cloud.');
+      setSyncBadge('Video dihapus. Menyinkronkan ulang...');
+      scheduleRemoteRefresh();
+    } catch (error) {
+      console.error(error);
+      showToast('Gagal menghapus video di cloud.');
+    }
+  };
+
+  window.addEventListener('focus', () => refreshRemoteMedia(true));
+  setTimeout(() => refreshRemoteMedia(true), 1200);
+  setInterval(() => refreshRemoteMedia(true), 120000);
+})();
 </script>
 
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"7939e04a4baf43c8b86a560f74aac60e","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
