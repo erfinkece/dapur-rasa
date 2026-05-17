@@ -638,6 +638,25 @@
   .small-action-btn.is-favorite { background: var(--terracotta); color: #fff; }
   .small-action-btn.has-image { background: var(--forest); color: #fff; }
   .small-action-btn.remove-image-btn { background: rgba(26, 15, 8, 0.72); color: #fff; }
+  .small-action-btn.has-video { background: var(--mustard); color: var(--espresso); }
+  .small-action-btn.remove-video-btn { background: rgba(160, 58, 36, 0.88); color: #fff; }
+
+  .card-video-badge {
+    position: absolute;
+    left: 16px;
+    top: 54px;
+    z-index: 2;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(26, 15, 8, 0.72);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
 
   .recipe-photo,
   .modal-photo {
@@ -1221,6 +1240,69 @@
     line-height: 1.6;
   }
   
+  .video-section {
+    margin: 42px 0 44px;
+  }
+
+  .video-toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+
+  .video-frame {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border-radius: 22px;
+    background: var(--espresso);
+    box-shadow: 0 18px 48px rgba(45, 24, 16, 0.18);
+  }
+
+  .video-frame iframe,
+  .video-frame video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    object-fit: cover;
+  }
+
+  .video-placeholder,
+  .video-link-card {
+    border-radius: 22px;
+    padding: 28px;
+    background: var(--cream);
+    border: 1px dashed rgba(45, 24, 16, 0.20);
+    color: var(--espresso-soft);
+    line-height: 1.7;
+  }
+
+  .video-placeholder strong,
+  .video-link-card strong {
+    display: block;
+    font-family: 'Fraunces', serif;
+    font-size: 24px;
+    color: var(--espresso);
+    margin-bottom: 8px;
+  }
+
+  .video-link-card a {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 12px 18px;
+    border-radius: 999px;
+    background: var(--espresso);
+    color: var(--cream);
+    text-decoration: none;
+    font-weight: 800;
+  }
+
   .tips-section {
     margin-top: 40px;
     padding: 28px;
@@ -1727,7 +1809,7 @@
   <div class="submission-panel">
     <aside class="submission-copy">
       <h3 class="modal-section-title">Kirim resepmu</h3>
-      <p>Isi resep yang ingin kamu bagikan. Data akan dikirim ke Google Sheets melalui Google Apps Script. Jika kamu mengunggah foto dan Apps Script sudah memakai fitur Drive upload, foto akan tersimpan di Google Drive dan linknya masuk ke Sheet.</p>
+      <p>Isi resep yang ingin kamu bagikan. Data akan dikirim ke Google Sheets melalui Google Apps Script. Jika kamu mengunggah foto dan menambahkan link video tutorial, data tersebut ikut masuk ke Google Sheets. Foto bisa tersimpan ke Google Drive jika Apps Script sudah memakai fitur Drive upload.</p>
       <div class="firebase-status online" id="firebaseStatus">Google Apps Script aktif — data masuk ke Google Sheets</div>
       <div class="firebase-note">
         <strong>Catatan jujur:</strong> kiriman dari pengunjung tetap harus kamu review manual di Google Sheets sebelum dimasukkan ke website. Jangan tampilkan otomatis tanpa moderasi, karena form publik rawan spam dan link aneh.
@@ -1782,6 +1864,11 @@
             <label for="submittedPhotoUrl">Link foto masakan</label>
             <input id="submittedPhotoUrl" name="photoUrl" type="url" maxlength="500" placeholder="https://...">
             <span class="form-help">Opsional. Bisa isi link Drive/Instagram kalau tidak upload file.</span>
+          </div>
+          <div class="form-field">
+            <label for="submittedVideoUrl">Link video tutorial</label>
+            <input id="submittedVideoUrl" name="videoUrl" type="url" maxlength="700" placeholder="https://youtube.com/...">
+            <span class="form-help">Opsional. Bisa YouTube, Google Drive, TikTok, Instagram, atau link video langsung.</span>
           </div>
           <div class="form-field">
             <label for="submittedPhotoFile">Upload foto menu</label>
@@ -4364,10 +4451,12 @@ let activeCategory = 'all';
 let activeRecipe = null;
 let favorites = new Set(JSON.parse(localStorage.getItem('dapurRasaFavorites') || '[]'));
 let recipeImages = {};
+let recipeVideos = {};
 let pendingImageKey = null;
 let imageDb = null;
 let toastTimer = null;
 
+const VIDEO_STORAGE_KEY = 'dapurRasaRecipeVideos';
 const IMAGE_DB_NAME = 'DapurRasaRecipeImages';
 const IMAGE_STORE_NAME = 'images';
 const IMAGE_DB_VERSION = 1;
@@ -4396,6 +4485,159 @@ function showToast(message) {
   toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+}
+
+function loadRecipeVideos() {
+  try {
+    recipeVideos = JSON.parse(localStorage.getItem(VIDEO_STORAGE_KEY) || '{}');
+  } catch (error) {
+    recipeVideos = {};
+  }
+}
+
+function saveRecipeVideos() {
+  localStorage.setItem(VIDEO_STORAGE_KEY, JSON.stringify(recipeVideos));
+}
+
+function getRecipeVideoUrl(recipe, key) {
+  return String(recipeVideos[key] || recipe.videoUrl || '').trim();
+}
+
+function normalizeVideoUrl(value) {
+  const url = String(value || '').trim();
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    return parsed.href;
+  } catch (error) {
+    return '';
+  }
+}
+
+function getVideoEmbedUrl(url) {
+  const safeUrl = normalizeVideoUrl(url);
+  if (!safeUrl) return '';
+
+  try {
+    const parsed = new URL(safeUrl);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+
+    if (host === 'youtu.be') {
+      const id = parsed.pathname.split('/').filter(Boolean)[0];
+      return id ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}` : '';
+    }
+
+    if (host.includes('youtube.com')) {
+      let id = parsed.searchParams.get('v');
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (!id && parts[0] === 'shorts') id = parts[1];
+      if (!id && parts[0] === 'embed') id = parts[1];
+      return id ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}` : '';
+    }
+
+    if (host.includes('drive.google.com')) {
+      const fileMatch = parsed.pathname.match(/\/file\/d\/([^/]+)/);
+      const id = fileMatch ? fileMatch[1] : parsed.searchParams.get('id');
+      return id ? `https://drive.google.com/file/d/${encodeURIComponent(id)}/preview` : '';
+    }
+
+    return '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function isDirectVideoUrl(url) {
+  return /\.(mp4|webm|ogg)(\?.*)?$/i.test(String(url || ''));
+}
+
+function findRecipeByKey(key) {
+  const [category, ...rest] = String(key || '').split(':');
+  const id = rest.join(':');
+  const recipe = (RECIPES[category] || []).find(item => item.id === id);
+  return recipe ? { ...recipe, category } : null;
+}
+
+function startVideoEdit(key) {
+  const recipe = findRecipeByKey(key) || activeRecipe;
+  const current = recipe ? getRecipeVideoUrl(recipe, key) : (recipeVideos[key] || '');
+  const input = prompt('Tempel link video tutorial untuk resep ini. Bisa YouTube, Google Drive, Instagram, TikTok, atau link MP4/WebM. Kosongkan lalu OK untuk menghapus.', current || '');
+  if (input === null) return;
+
+  const trimmed = String(input).trim();
+  if (!trimmed) {
+    delete recipeVideos[key];
+    saveRecipeVideos();
+    showToast('Video tutorial dihapus dari resep ini.');
+  } else {
+    const normalized = normalizeVideoUrl(trimmed);
+    if (!normalized) {
+      showToast('Link video tidak valid. Gunakan link http/https.');
+      return;
+    }
+    recipeVideos[key] = normalized;
+    saveRecipeVideos();
+    showToast('Link video tutorial berhasil disimpan di browser ini.');
+  }
+
+  renderRecipes();
+  if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+    openRecipe(activeRecipe.category, activeRecipe.id, false);
+  }
+}
+
+function removeRecipeVideo(key) {
+  delete recipeVideos[key];
+  saveRecipeVideos();
+  renderRecipes();
+  if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
+    openRecipe(activeRecipe.category, activeRecipe.id, false);
+  }
+  showToast('Video tutorial dihapus dari resep ini.');
+}
+
+function buildVideoSection(recipe, key) {
+  const rawUrl = getRecipeVideoUrl(recipe, key);
+  const safeUrl = normalizeVideoUrl(rawUrl);
+  const embedUrl = getVideoEmbedUrl(safeUrl);
+  const directVideo = safeUrl && isDirectVideoUrl(safeUrl);
+
+  let videoBody = '';
+  if (embedUrl) {
+    videoBody = `
+      <div class="video-frame">
+        <iframe src="${escapeHtml(embedUrl)}" title="Video tutorial ${escapeHtml(recipe.name)}" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+      </div>`;
+  } else if (directVideo) {
+    videoBody = `
+      <div class="video-frame">
+        <video src="${escapeHtml(safeUrl)}" controls preload="metadata"></video>
+      </div>`;
+  } else if (safeUrl) {
+    videoBody = `
+      <div class="video-link-card">
+        <strong>Video dari platform eksternal</strong>
+        <p>Platform ini tidak selalu bisa di-embed langsung di website. Gunakan tombol berikut untuk membuka tutorialnya.</p>
+        <a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">▶️ Buka video tutorial</a>
+      </div>`;
+  } else {
+    videoBody = `
+      <div class="video-placeholder">
+        <strong>Belum ada video tutorial</strong>
+        <p>Tambahkan link video agar pengunjung bisa melihat proses memasak secara visual. Untuk hasil paling rapi, pakai link YouTube atau Google Drive yang aksesnya publik.</p>
+      </div>`;
+  }
+
+  return `
+    <section class="video-section" aria-label="Video tutorial ${escapeHtml(recipe.name)}">
+      <h3 class="modal-section-title">Video Tutorial</h3>
+      <div class="video-toolbar">
+        <button class="print-btn" type="button" onclick='startVideoEdit(${jsString(key)})'>🎬 ${safeUrl ? 'Ganti video' : 'Tambah video'}</button>
+        ${safeUrl ? `<button class="print-btn" type="button" onclick='removeRecipeVideo(${jsString(key)})'>🗑️ Hapus video</button>` : ''}
+      </div>
+      ${videoBody}
+    </section>`;
 }
 
 function updateImageCounter() {
@@ -4647,6 +4889,8 @@ function renderRecipes() {
     const key = getRecipeKey(recipe.category, recipe.id);
     const isFavorite = favorites.has(key);
     const imageUrl = recipeImages[key];
+    const videoUrl = getRecipeVideoUrl(recipe, key);
+    const hasVideo = Boolean(normalizeVideoUrl(videoUrl));
     const imageMarkup = imageUrl
       ? `<img class="recipe-photo" src="${escapeHtml(imageUrl)}" alt="Foto ${escapeHtml(recipe.name)}" loading="lazy">`
       : '';
@@ -4658,8 +4902,10 @@ function renderRecipes() {
           <div class="card-actions">
             <button class="small-action-btn favorite-btn ${isFavorite ? 'is-favorite' : ''}" type="button" data-fav-key="${escapeHtml(key)}" aria-label="${isFavorite ? 'Hapus dari favorit' : 'Tambah ke favorit'}">${isFavorite ? '♥' : '♡'}</button>
             <button class="small-action-btn upload-btn ${imageUrl ? 'has-image' : ''}" type="button" data-image-key="${escapeHtml(key)}" aria-label="${imageUrl ? 'Ganti foto' : 'Upload foto'} untuk ${escapeHtml(recipe.name)}">📷</button>
+            <button class="small-action-btn video-btn ${hasVideo ? 'has-video' : ''}" type="button" data-video-key="${escapeHtml(key)}" aria-label="${hasVideo ? 'Ganti video tutorial' : 'Tambah video tutorial'} untuk ${escapeHtml(recipe.name)}">🎬</button>
             ${imageUrl ? `<button class="small-action-btn remove-image-btn" type="button" data-image-key="${escapeHtml(key)}" aria-label="Hapus foto ${escapeHtml(recipe.name)}">🗑️</button>` : ''}
           </div>
+          ${hasVideo ? '<span class="card-video-badge">▶ Video</span>' : ''}
           <span class="recipe-emoji" aria-hidden="true">${recipe.emoji}</span>
           <span class="upload-hint">${imageUrl ? 'Foto tersimpan' : 'Upload foto'}</span>
           <span class="card-time">⏱️ ${escapeHtml(recipe.time)}</span>
@@ -4672,6 +4918,7 @@ function renderRecipes() {
             <span>👥 ${escapeHtml(recipe.servings)}</span>
             <span>📊 ${escapeHtml(recipe.difficulty)}</span>
             <span>📝 ${recipe.steps.length} langkah</span>
+            <span>🎬 ${hasVideo ? 'Ada video' : 'Belum ada'}</span>
           </div>
         </div>
       </article>
@@ -4711,6 +4958,8 @@ function openRecipe(category, id, shouldScroll = true) {
   const key = getRecipeKey(category, id);
   const isFavorite = favorites.has(key);
   const imageUrl = recipeImages[key];
+  const videoUrl = getRecipeVideoUrl(recipe, key);
+  const hasVideo = Boolean(normalizeVideoUrl(videoUrl));
   const modalImageMarkup = imageUrl
     ? `<img class="modal-photo" src="${escapeHtml(imageUrl)}" alt="Foto ${escapeHtml(recipe.name)}">`
     : '';
@@ -4749,6 +4998,7 @@ function openRecipe(category, id, shouldScroll = true) {
         <button class="print-btn" type="button" onclick="window.print()">🖨️ Print resep</button>
         <button class="print-btn" type="button" onclick="toggleFavorite('${escapeHtml(key)}')">${isFavorite ? '♥ Hapus favorit' : '♡ Simpan favorit'}</button>
         <button class="print-btn" type="button" onclick='startImageUpload(${jsString(key)})'>📷 ${imageUrl ? 'Ganti foto' : 'Upload foto'}</button>
+        <button class="print-btn" type="button" onclick='startVideoEdit(${jsString(key)})'>🎬 ${hasVideo ? 'Ganti video' : 'Tambah video'}</button>
         ${imageUrl ? `<button class="print-btn" type="button" onclick='removeRecipeImage(${jsString(key)})'>🗑️ Hapus foto</button>` : ''}
       </div>
       
@@ -4781,6 +5031,8 @@ function openRecipe(category, id, shouldScroll = true) {
       <h3 class="modal-section-title">Cara Membuat</h3>
       <div class="steps-list">${stepList}</div>
       
+      ${buildVideoSection(recipe, key)}
+
       <div class="tips-section">
         <div class="tips-title">✨ Tips Chef</div>
         <p>${escapeHtml(recipe.tips)}</p>
@@ -4814,6 +5066,8 @@ window.closeModal = closeModal;
 window.toggleFavorite = toggleFavorite;
 window.startImageUpload = startImageUpload;
 window.removeRecipeImage = removeRecipeImage;
+window.startVideoEdit = startVideoEdit;
+window.removeRecipeVideo = removeRecipeVideo;
 
 tabs.forEach(tab => {
   tab.addEventListener('click', () => setActiveCategory(tab.dataset.cat));
@@ -4874,6 +5128,13 @@ grid.addEventListener('click', (event) => {
     return;
   }
 
+  const videoButton = event.target.closest('.video-btn');
+  if (videoButton) {
+    event.stopPropagation();
+    startVideoEdit(videoButton.dataset.videoKey);
+    return;
+  }
+
   const removeImageButton = event.target.closest('.remove-image-btn');
   if (removeImageButton) {
     event.stopPropagation();
@@ -4917,13 +5178,14 @@ window.addEventListener('scroll', () => {
 }, { passive: true });
 
 // Initial render
+loadRecipeVideos();
 loadRecipeImages().then(renderRecipes);
 </script>
 
 
 <script>
 // ===== Google Sheets + Apps Script + Form Masukan Resep =====
-const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzSE7_zvJLLtGDUwE4yzaifijKlR77MBNf_pikwO9s8shZXyumeOTkthz3kM4_c8bKc/exec';
+const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyNnBrfIJll4MiJJrJfAmxq3W3aT72b2sHarMdpyzY5xFBV8IemwmsX68cO2TNcDjSP/exec';
 const LOCAL_SUBMISSION_KEY = 'dapurRasaRecipeSubmissions';
 const MAX_LOCAL_ITEMS = 20;
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -4953,8 +5215,7 @@ function safeText(value) {
 
 function splitLines(value) {
   return String(value || '')
-    .split('
-')
+    .split('\n')
     .map(item => item.trim())
     .filter(Boolean)
     .slice(0, 60);
@@ -4996,6 +5257,7 @@ function buildSubmissionFromForm() {
     servings: String(formData.get('servings') || '').trim() || 'Belum diisi',
     difficulty: String(formData.get('difficulty') || 'Mudah').trim(),
     photoUrl: String(formData.get('photoUrl') || '').trim(),
+    videoUrl: String(formData.get('videoUrl') || '').trim(),
     ingredients: splitLines(formData.get('ingredients')),
     steps: splitLines(formData.get('steps')),
     tips: String(formData.get('tips') || '').trim(),
@@ -5013,6 +5275,10 @@ function validateSubmission(item, photoFile) {
   if (item.photoUrl) {
     try { new URL(item.photoUrl); }
     catch (error) { return 'Link foto tidak valid.'; }
+  }
+  if (item.videoUrl) {
+    try { new URL(item.videoUrl); }
+    catch (error) { return 'Link video tutorial tidak valid.'; }
   }
   if (photoFile) {
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(photoFile.type)) {
@@ -5045,7 +5311,7 @@ function renderSubmissionItems(items) {
         <span>${safeText(item.difficulty)}</span>
         <span>${safeText(item.status || 'terkirim')}</span>
       </div>
-      <p>Dikirim oleh ${safeText(item.submitterName)}. ${item.ingredients?.length || 0} bahan, ${item.steps?.length || 0} langkah.</p>
+      <p>Dikirim oleh ${safeText(item.submitterName)}. ${item.ingredients?.length || 0} bahan, ${item.steps?.length || 0} langkah${item.videoUrl ? ', ada link video tutorial' : ''}.</p>
     </article>
   `).join('');
 }
@@ -5101,12 +5367,12 @@ async function buildGoogleSheetPayload(item, photoFile) {
   payload.append('waktuMasak', item.time);
   payload.append('porsi', item.servings);
   payload.append('kesulitan', item.difficulty);
-  payload.append('bahan', item.ingredients.join('
-'));
-  payload.append('langkah', item.steps.join('
-'));
+  payload.append('bahan', item.ingredients.join('\n'));
+  payload.append('langkah', item.steps.join('\n'));
   payload.append('tips', item.tips);
   payload.append('linkFoto', item.photoUrl);
+  payload.append('linkVideo', item.videoUrl);
+  payload.append('videoTutorial', item.videoUrl);
   payload.append('userAgent', navigator.userAgent.slice(0, 240));
 
   if (photoFile) {
@@ -5148,7 +5414,7 @@ form?.addEventListener('submit', async (event) => {
     saveLocalSubmission({ ...item, hasUploadedPhoto: Boolean(photoFile) });
     form.reset();
     refreshSubmissions();
-    notify('Resep berhasil dikirim. Cek Google Sheets untuk memastikan data masuk.');
+    notify('Resep berhasil dikirim. Cek Google Sheets untuk memastikan data, foto, dan link video masuk.');
     formStatus.textContent = 'Terkirim ke Google Sheets. Cek Sheet untuk verifikasi.';
   } catch (error) {
     console.error('Gagal mengirim ke Google Apps Script:', error);
