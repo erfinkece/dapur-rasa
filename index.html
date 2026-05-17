@@ -5432,14 +5432,50 @@ refreshSubmissions();
 </script>
 
 
+
+
+
 <script>
-// ===== Sinkronisasi online foto + video per resep (lintas device) =====
+// ===== Sinkronisasi online foto + video per resep (lintas device) - FIX anti hilang =====
 (function(){
   const REMOTE_MEDIA_ENDPOINT = (typeof GOOGLE_SCRIPT_URL === 'string' && GOOGLE_SCRIPT_URL) || 'https://script.google.com/macros/s/AKfycbzSzmvNUM4xZS4SwfdFpgNtcEtlf7aDE92gANbLEQQUtD-Vdd7bgcA8HDm2BpEa5vFO/exec';
-  const REMOTE_SYNC_DELAY = 2500;
+  const PENDING_MEDIA_KEY = 'dapurRasaPendingCloudMedia';
+  const REMOTE_SYNC_DELAY = 3500;
   let syncTimer = null;
   let syncInFlight = false;
   let lastSyncAt = null;
+
+  function loadPendingMedia() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PENDING_MEDIA_KEY) || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function savePendingMedia(map) {
+    try {
+      localStorage.setItem(PENDING_MEDIA_KEY, JSON.stringify(map || {}));
+    } catch (error) {
+      console.warn('Pending media penuh:', error);
+      showToast('Penyimpanan sementara penuh. Pakai foto yang lebih kecil.');
+    }
+  }
+
+  function setPendingMedia(key, patch) {
+    const pending = loadPendingMedia();
+    pending[key] = { ...(pending[key] || {}), ...patch, pendingAt: new Date().toISOString() };
+    savePendingMedia(pending);
+  }
+
+  function clearPendingField(key, fieldName) {
+    const pending = loadPendingMedia();
+    if (!pending[key]) return;
+    delete pending[key][fieldName];
+    if (!pending[key].imageUrl && !pending[key].videoUrl) delete pending[key];
+    savePendingMedia(pending);
+  }
 
   function ensureSyncBadge() {
     if (document.getElementById('mediaSyncBadge')) return document.getElementById('mediaSyncBadge');
@@ -5456,7 +5492,7 @@ refreshSubmissions();
     badge.style.borderRadius = '14px';
     badge.style.fontSize = '12px';
     badge.style.boxShadow = '0 8px 24px rgba(0,0,0,0.18)';
-    badge.style.maxWidth = '300px';
+    badge.style.maxWidth = '320px';
     badge.innerHTML = '<strong style="display:block;margin-bottom:3px;">Sinkronisasi media</strong><span id="mediaSyncBadgeText">Menyiapkan sinkronisasi online...</span>';
     document.body.appendChild(badge);
     return badge;
@@ -5480,21 +5516,47 @@ refreshSubmissions();
     }
   }
 
-  function mergeRemoteMediaMap(map) {
-    recipeImages = {};
-    recipeVideos = {};
-    Object.entries(map || {}).forEach(([key, item]) => {
+  function applyRemoteAndPendingMedia(remoteMap) {
+    const pending = loadPendingMedia();
+    const merged = {};
+
+    // Remote dari Google Sheet adalah sumber utama.
+    Object.entries(remoteMap || {}).forEach(([key, item]) => {
       if (!item || typeof item !== 'object') return;
       const imageUrl = String(item.imageUrl || item.photoPreviewUrl || '').trim();
       const videoUrl = normalizeUrlOnline(item.videoUrl || item.linkVideo || item.videoTutorial || '');
-      if (imageUrl) recipeImages[key] = imageUrl;
-      if (videoUrl) recipeVideos[key] = videoUrl;
+      merged[key] = { ...(merged[key] || {}) };
+      if (imageUrl) {
+        merged[key].imageUrl = imageUrl;
+        clearPendingField(key, 'imageUrl');
+      }
+      if (videoUrl) {
+        merged[key].videoUrl = videoUrl;
+        clearPendingField(key, 'videoUrl');
+      }
+      if (!merged[key].imageUrl && !merged[key].videoUrl) delete merged[key];
     });
+
+    // Pending lokal dipakai sebagai jembatan supaya foto/video tidak hilang
+    // saat Apps Script belum selesai memproses upload.
+    Object.entries(loadPendingMedia()).forEach(([key, item]) => {
+      if (!item || typeof item !== 'object') return;
+      merged[key] = { ...(merged[key] || {}) };
+      if (!merged[key].imageUrl && item.imageUrl) merged[key].imageUrl = item.imageUrl;
+      if (!merged[key].videoUrl && item.videoUrl) merged[key].videoUrl = item.videoUrl;
+      if (!merged[key].imageUrl && !merged[key].videoUrl) delete merged[key];
+    });
+
+    recipeImages = {};
+    recipeVideos = {};
+    Object.entries(merged).forEach(([key, item]) => {
+      if (item.imageUrl) recipeImages[key] = item.imageUrl;
+      if (item.videoUrl) recipeVideos[key] = item.videoUrl;
+    });
+
     updateImageCounter();
     renderRecipes();
-    if (activeRecipe) {
-      openRecipe(activeRecipe.category, activeRecipe.id, false);
-    }
+    if (activeRecipe) openRecipe(activeRecipe.category, activeRecipe.id, false);
   }
 
   function fetchRemoteMedia() {
@@ -5544,14 +5606,18 @@ refreshSubmissions();
     if (!silent) setSyncBadge('Mengambil foto & video terbaru dari cloud...');
     try {
       const payload = await fetchRemoteMedia();
-      mergeRemoteMediaMap(payload.media || {});
+      applyRemoteAndPendingMedia(payload.media || {});
       lastSyncAt = new Date();
-      const totalMedia = Object.keys(payload.media || {}).length;
-      setSyncBadge('Sinkron aktif • ' + totalMedia + ' resep punya media • terakhir sinkron ' + lastSyncAt.toLocaleTimeString('id-ID'));
+      const remoteCount = Object.keys(payload.media || {}).length;
+      const pendingCount = Object.keys(loadPendingMedia()).length;
+      const pendingText = pendingCount ? ` • ${pendingCount} masih pending` : '';
+      setSyncBadge('Sinkron aktif • ' + remoteCount + ' media online' + pendingText + ' • ' + lastSyncAt.toLocaleTimeString('id-ID'));
     } catch (error) {
       console.warn('Sinkron media gagal:', error);
-      setSyncBadge('Sinkron gagal. Biasanya karena Apps Script belum diupdate ke versi media online.');
-      if (!silent) showToast('Sinkron media online gagal. Update Google Apps Script lalu deploy ulang.');
+      // Jangan kosongkan media saat sync gagal. Ini mencegah foto yang baru dipilih langsung hilang.
+      applyRemoteAndPendingMedia({});
+      setSyncBadge('Belum bisa baca media online. Pending lokal tetap ditampilkan.');
+      if (!silent) showToast('Sinkron media online gagal. Cek Apps Script dan deploy ulang.');
     } finally {
       syncInFlight = false;
     }
@@ -5575,11 +5641,7 @@ refreshSubmissions();
       if (value === undefined || value === null) return;
       payload.append(key, value);
     });
-    await fetch(REMOTE_MEDIA_ENDPOINT, {
-      method: 'POST',
-      mode: 'no-cors',
-      body: payload
-    });
+    await fetch(REMOTE_MEDIA_ENDPOINT, { method: 'POST', mode: 'no-cors', body: payload });
   }
 
   function getRecipeMetaByKey(key) {
@@ -5594,83 +5656,57 @@ refreshSubmissions();
     };
   }
 
-  // Override local-only video behavior with online sync.
   loadRecipeVideos = function() {
     recipeVideos = {};
+    applyRemoteAndPendingMedia({});
   };
 
-  saveRecipeVideos = function() {
-    // Disengaja kosong: sumber utama sekarang Google Apps Script, bukan localStorage.
-  };
+  saveRecipeVideos = function() {};
 
   getRecipeVideoUrl = function(recipe, key) {
     return String(recipeVideos[key] || recipe.videoUrl || '').trim();
   };
 
-  // Override local-only image loading with remote sync.
   loadRecipeImages = async function() {
-    recipeImages = {};
-    updateImageCounter();
+    applyRemoteAndPendingMedia({});
     await refreshRemoteMedia(true);
   };
 
   saveRecipeImage = async function(key, dataUrl) {
     const meta = getRecipeMetaByKey(key);
     recipeImages[key] = dataUrl;
+    setPendingMedia(key, { imageUrl: dataUrl });
     updateImageCounter();
     renderRecipes();
     if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
       openRecipe(activeRecipe.category, activeRecipe.id, false);
     }
-    showToast('Mengupload foto ke cloud... tunggu beberapa detik.');
+    showToast('Foto tampil sementara. Mengirim ke Google Drive...');
 
-    try {
-      const parts = dataUrlToParts(dataUrl);
-      await postMediaUpdate({
-        ...meta,
-        fotoBase64: parts.base64,
-        fotoMime: parts.mimeType,
-        fotoName: meta.recipeId + '.jpg'
-      });
-      showToast('Foto resep dikirim ke cloud. Refresh di device lain untuk melihat hasilnya.');
-      setSyncBadge('Foto diupload. Menyinkronkan ulang...');
-      scheduleRemoteRefresh();
-    } catch (error) {
-      console.error(error);
-      showToast(error.message || 'Gagal upload foto ke cloud.');
-      setSyncBadge('Upload foto gagal. Cek Apps Script atau folder Google Drive.');
-      throw error;
-    }
+    const parts = dataUrlToParts(dataUrl);
+    await postMediaUpdate({ ...meta, fotoBase64: parts.base64, fotoMime: parts.mimeType, fotoName: meta.recipeId + '.jpg' });
+    showToast('Foto dikirim untuk diproses. Tunggu sinkronisasi beberapa detik.');
+    setSyncBadge('Foto dikirim. Menunggu Google Sheet/Drive memproses...');
+    scheduleRemoteRefresh();
   };
 
   deleteRecipeImage = async function(key) {
     const meta = getRecipeMetaByKey(key);
     delete recipeImages[key];
+    clearPendingField(key, 'imageUrl');
     updateImageCounter();
     renderRecipes();
     if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
       openRecipe(activeRecipe.category, activeRecipe.id, false);
     }
-
-    try {
-      await postMediaUpdate({ ...meta, removePhoto: '1' });
-      showToast('Foto dihapus dari cloud.');
-      setSyncBadge('Foto dihapus. Menyinkronkan ulang...');
-      scheduleRemoteRefresh();
-    } catch (error) {
-      console.error(error);
-      showToast('Gagal menghapus foto dari cloud.');
-      setSyncBadge('Gagal menghapus foto dari cloud.');
-      throw error;
-    }
+    await postMediaUpdate({ ...meta, removePhoto: '1' });
+    showToast('Perintah hapus foto dikirim ke cloud.');
+    scheduleRemoteRefresh();
   };
 
   removeRecipeImage = async function(key) {
-    try {
-      await deleteRecipeImage(key);
-    } catch (error) {
-      // toast sudah ditangani di deleteRecipeImage
-    }
+    try { await deleteRecipeImage(key); }
+    catch (error) { console.error(error); showToast('Gagal menghapus foto.'); }
   };
 
   startVideoEdit = async function(key) {
@@ -5679,19 +5715,17 @@ refreshSubmissions();
     const input = prompt('Tempel link video tutorial untuk resep ini. Sebaiknya YouTube atau Google Drive. Kosongkan lalu OK untuk menghapus.', current || '');
     if (input === null) return;
 
-    const trimmed = String(input).trim();
     const meta = getRecipeMetaByKey(key);
+    const trimmed = String(input).trim();
 
     if (!trimmed) {
       delete recipeVideos[key];
+      clearPendingField(key, 'videoUrl');
       renderRecipes();
-      if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
-        openRecipe(activeRecipe.category, activeRecipe.id, false);
-      }
+      if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) openRecipe(activeRecipe.category, activeRecipe.id, false);
       try {
         await postMediaUpdate({ ...meta, removeVideo: '1' });
-        showToast('Video tutorial dihapus dari cloud.');
-        setSyncBadge('Video dihapus. Menyinkronkan ulang...');
+        showToast('Perintah hapus video dikirim ke cloud.');
         scheduleRemoteRefresh();
       } catch (error) {
         console.error(error);
@@ -5707,34 +5741,29 @@ refreshSubmissions();
     }
 
     recipeVideos[key] = normalized;
+    setPendingMedia(key, { videoUrl: normalized });
     renderRecipes();
-    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
-      openRecipe(activeRecipe.category, activeRecipe.id, false);
-    }
+    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) openRecipe(activeRecipe.category, activeRecipe.id, false);
 
     try {
       await postMediaUpdate({ ...meta, videoUrl: normalized });
-      showToast('Video tutorial dikirim ke cloud.');
-      setSyncBadge('Video disimpan. Menyinkronkan ulang...');
+      showToast('Video dikirim untuk disimpan online.');
       scheduleRemoteRefresh();
     } catch (error) {
       console.error(error);
-      showToast('Gagal menyimpan video di cloud.');
-      setSyncBadge('Gagal menyimpan video di cloud.');
+      showToast('Gagal menyimpan video di cloud. Link tetap tampil sementara di browser ini.');
     }
   };
 
   removeRecipeVideo = async function(key) {
     const meta = getRecipeMetaByKey(key);
     delete recipeVideos[key];
+    clearPendingField(key, 'videoUrl');
     renderRecipes();
-    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) {
-      openRecipe(activeRecipe.category, activeRecipe.id, false);
-    }
+    if (activeRecipe && getRecipeKey(activeRecipe.category, activeRecipe.id) === key) openRecipe(activeRecipe.category, activeRecipe.id, false);
     try {
       await postMediaUpdate({ ...meta, removeVideo: '1' });
-      showToast('Video tutorial dihapus dari cloud.');
-      setSyncBadge('Video dihapus. Menyinkronkan ulang...');
+      showToast('Perintah hapus video dikirim ke cloud.');
       scheduleRemoteRefresh();
     } catch (error) {
       console.error(error);
@@ -5743,7 +5772,7 @@ refreshSubmissions();
   };
 
   window.addEventListener('focus', () => refreshRemoteMedia(true));
-  setTimeout(() => refreshRemoteMedia(true), 1200);
+  setTimeout(() => refreshRemoteMedia(true), 1400);
   setInterval(() => refreshRemoteMedia(true), 120000);
 })();
 </script>
